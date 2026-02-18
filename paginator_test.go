@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -104,11 +105,33 @@ func TestPaginate_NegativeTotalReturnsError(t *testing.T) {
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "itemTotalCallback failed") {
+	if !strings.Contains(err.Error(), "total items must not be negative") {
 		t.Fatalf("expected contextual message, got: %v", err)
 	}
 	if sliceCalled {
 		t.Fatal("slice callback should not be called when total is negative")
+	}
+}
+
+func TestPaginator_NilCursorCallback(t *testing.T) {
+	p := NewPaginator(WithCursorSliceCallback[int](nil))
+	_, err := p.PaginateByCursor(context.TODO(), CursorRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected error for nil cursorSliceCallback, got nil")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
+	}
+}
+
+func TestPaginator_NilKeysetCallback(t *testing.T) {
+	p := NewPaginator(WithKeysetSliceCallback[int](nil))
+	_, err := p.PaginateByKeyset(context.TODO(), KeysetRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected error for nil keysetSliceCallback, got nil")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
 	}
 }
 
@@ -419,6 +442,55 @@ func TestPaginate_ContextCancelledBetweenCallbacks(t *testing.T) {
 	}
 }
 
+func TestPaginate_ContextAlreadyCancelledSkipsItemTotalCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	totalCalled := false
+	p := NewPaginator[int](
+		WithItemTotalCallback[int](func(ctx context.Context) (int64, error) {
+			totalCalled = true
+			return 10, nil
+		}),
+		WithSliceCallback[int](func(ctx context.Context, offset, limit int) ([]int, error) {
+			t.Fatal("sliceCallback should not be called when context is already canceled")
+			return nil, nil
+		}),
+	)
+
+	_, err := p.Paginate(ctx, 1)
+	if err == nil {
+		t.Fatal("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if totalCalled {
+		t.Fatal("itemTotalCallback should not be called when context is already canceled")
+	}
+}
+
+func TestPaginate_NilContextReturnsError(t *testing.T) {
+	p := NewPaginator[int](
+		WithKnownTotal[int](1),
+		WithSliceCallback[int](func(ctx context.Context, offset, limit int) ([]int, error) {
+			t.Fatal("sliceCallback should not be called when context is nil")
+			return nil, nil
+		}),
+	)
+
+	_, err := p.Paginate(context.TODO(), 1)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "context must not be nil") {
+		t.Fatalf("expected nil-context error message, got: %v", err)
+	}
+}
+
 func TestPaginator_InvalidCurrentPageReturnsError(t *testing.T) {
 	p := NewPaginator[int](
 		WithKnownTotal[int](1),
@@ -456,6 +528,63 @@ func TestPaginate_CeilingDivisionNoOverflowAtMaxInt64(t *testing.T) {
 	wantTotalPages := int(total/2 + 1)
 	if result.TotalPages != wantTotalPages {
 		t.Fatalf("TotalPages=%d, want=%d", result.TotalPages, wantTotalPages)
+	}
+}
+
+func TestPaginate_PageCountOverflowReturnsErrorOn32Bit(t *testing.T) {
+	if strconv.IntSize != 32 {
+		t.Skip("architecture is not 32-bit")
+	}
+
+	sliceCalled := false
+	p := NewPaginator[int](
+		WithItemsPerPage[int](1),
+		WithKnownTotal[int](math.MaxInt64),
+		WithSliceCallback[int](func(ctx context.Context, offset, limit int) ([]int, error) {
+			sliceCalled = true
+			return []int{1}, nil
+		}),
+	)
+
+	_, err := p.Paginate(context.Background(), 1)
+	if err == nil {
+		t.Fatal("expected overflow protection error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
+	}
+	if sliceCalled {
+		t.Fatal("slice callback should not be called when page count overflows int")
+	}
+}
+
+func TestPaginate_OffsetOverflowReturnsErrorOn32Bit(t *testing.T) {
+	if strconv.IntSize != 32 {
+		t.Skip("architecture is not 32-bit")
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	total := int64(maxInt) * 2
+	sliceCalled := false
+
+	p := NewPaginator[int](
+		WithItemsPerPage[int](2),
+		WithKnownTotal[int](total),
+		WithSliceCallback[int](func(ctx context.Context, offset, limit int) ([]int, error) {
+			sliceCalled = true
+			return []int{1}, nil
+		}),
+	)
+
+	_, err := p.Paginate(context.Background(), maxInt)
+	if err == nil {
+		t.Fatal("expected overflow protection error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
+	}
+	if sliceCalled {
+		t.Fatal("slice callback should not be called when offset overflows int")
 	}
 }
 
@@ -522,6 +651,362 @@ func TestPagination_HelperMethods(t *testing.T) {
 		}
 		if !result.IsLastPage() {
 			t.Fatal("IsLastPage() = false, want true")
+		}
+	})
+}
+
+func TestPaginateByCursor_ForwardAndBoundary(t *testing.T) {
+	after := "cursor:10"
+	next := "cursor:20"
+	prev := "cursor:0"
+
+	p := NewPaginator[string](
+		WithItemsPerPage[string](2),
+		WithCursorSliceCallback[string](func(ctx context.Context, req CursorRequest) (*CursorResult[string], error) {
+			if req.AfterCursor == nil || *req.AfterCursor != after {
+				t.Fatalf("after cursor=%v, want=%q", req.AfterCursor, after)
+			}
+			if req.Limit != 2 {
+				t.Fatalf("limit=%d, want=2", req.Limit)
+			}
+			if req.Direction != DirectionForward {
+				t.Fatalf("direction=%q, want=%q", req.Direction, DirectionForward)
+			}
+			return &CursorResult[string]{
+				Items:          []string{"a", "b"},
+				NextCursor:     &next,
+				PreviousCursor: &prev,
+				HasMore:        true,
+			}, nil
+		}),
+	)
+
+	result, err := p.PaginateByCursor(context.Background(), CursorRequest{AfterCursor: &after})
+	if err != nil {
+		t.Fatalf("PaginateByCursor returned error: %v", err)
+	}
+	if len(result.Items) != 2 || result.Items[0] != "a" || result.Items[1] != "b" {
+		t.Fatalf("unexpected items: %#v", result.Items)
+	}
+	if result.NextCursor == nil || *result.NextCursor != next {
+		t.Fatalf("NextCursor=%v, want=%q", result.NextCursor, next)
+	}
+	if result.PreviousCursor == nil || *result.PreviousCursor != prev {
+		t.Fatalf("PreviousCursor=%v, want=%q", result.PreviousCursor, prev)
+	}
+	if !result.HasMore {
+		t.Fatal("HasMore=false, want=true")
+	}
+	if !result.HasNext() {
+		t.Fatal("HasNext()=false, want=true")
+	}
+	if !result.HasPrevious() {
+		t.Fatal("HasPrevious()=false, want=true")
+	}
+
+	pBoundary := NewPaginator[string](
+		WithCursorSliceCallback[string](func(ctx context.Context, req CursorRequest) (*CursorResult[string], error) {
+			return &CursorResult[string]{
+				Items:   []string{},
+				HasMore: false,
+			}, nil
+		}),
+	)
+
+	boundary, err := pBoundary.PaginateByCursor(context.Background(), CursorRequest{Limit: 1})
+	if err != nil {
+		t.Fatalf("PaginateByCursor returned error: %v", err)
+	}
+	if boundary.HasMore {
+		t.Fatal("HasMore=true, want=false")
+	}
+	if boundary.HasNext() {
+		t.Fatal("HasNext()=true, want=false")
+	}
+}
+
+func TestPaginateByCursor_InvalidRequestAndErrors(t *testing.T) {
+	after := "a"
+	before := "b"
+
+	p := NewPaginator[int](
+		WithCursorSliceCallback[int](func(ctx context.Context, req CursorRequest) (*CursorResult[int], error) {
+			return &CursorResult[int]{Items: []int{1}}, nil
+		}),
+	)
+
+	_, err := p.PaginateByCursor(context.Background(), CursorRequest{AfterCursor: &after, BeforeCursor: &before})
+	if err == nil {
+		t.Fatal("expected error for invalid cursor request, got nil")
+	}
+	if !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("expected ErrInvalidCursor, got: %v", err)
+	}
+
+	inner := errors.New("query failed")
+	pWrap := NewPaginator[int](
+		WithCursorSliceCallback[int](func(ctx context.Context, req CursorRequest) (*CursorResult[int], error) {
+			return nil, inner
+		}),
+	)
+
+	_, err = pWrap.PaginateByCursor(context.Background(), CursorRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected wrapped callback error, got nil")
+	}
+	if !errors.Is(err, inner) {
+		t.Fatalf("expected wrapped inner error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cursorSliceCallback failed") {
+		t.Fatalf("expected contextual message, got: %v", err)
+	}
+}
+
+func TestPaginateByCursor_RequiresCallbackAndContextCancel(t *testing.T) {
+	p := NewPaginator[int]()
+	_, err := p.PaginateByCursor(context.Background(), CursorRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrCallbackNotFound) {
+		t.Fatalf("expected ErrCallbackNotFound, got: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p2 := NewPaginator[int](
+		WithCursorSliceCallback[int](func(ctx context.Context, req CursorRequest) (*CursorResult[int], error) {
+			t.Fatal("cursor callback should not be called for cancelled context")
+			return nil, nil
+		}),
+	)
+	_, err = p2.PaginateByCursor(ctx, CursorRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+}
+
+func TestPaginateByCursor_NilContextReturnsError(t *testing.T) {
+	p := NewPaginator[int](
+		WithCursorSliceCallback[int](func(ctx context.Context, req CursorRequest) (*CursorResult[int], error) {
+			t.Fatal("cursor callback should not be called when context is nil")
+			return nil, nil
+		}),
+	)
+
+	_, err := p.PaginateByCursor(context.TODO(), CursorRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "context must not be nil") {
+		t.Fatalf("expected nil-context error message, got: %v", err)
+	}
+}
+
+func TestPaginateByKeyset_BackwardAndValidation(t *testing.T) {
+	before := "2026-01-10T12:00:00Z|42"
+	next := "2026-01-10T12:00:00Z|41"
+	prev := "2026-01-10T12:00:00Z|43"
+
+	p := NewPaginator[string](
+		WithItemsPerPage[string](3),
+		WithKeysetSliceCallback[string](func(ctx context.Context, req KeysetRequest) (*KeysetResult[string], error) {
+			if req.BeforeKey == nil || *req.BeforeKey != before {
+				t.Fatalf("before key=%v, want=%q", req.BeforeKey, before)
+			}
+			if req.AfterKey != nil {
+				t.Fatalf("after key=%v, want=nil", req.AfterKey)
+			}
+			if req.Limit != 3 {
+				t.Fatalf("limit=%d, want=3", req.Limit)
+			}
+			if req.Direction != DirectionBackward {
+				t.Fatalf("direction=%q, want=%q", req.Direction, DirectionBackward)
+			}
+			return &KeysetResult[string]{
+				Items:       []string{"r43", "r42", "r41"},
+				NextKey:     &next,
+				PreviousKey: &prev,
+				HasMore:     true,
+			}, nil
+		}),
+	)
+
+	result, err := p.PaginateByKeyset(context.Background(), KeysetRequest{
+		BeforeKey: &before,
+		Direction: DirectionBackward,
+	})
+	if err != nil {
+		t.Fatalf("PaginateByKeyset returned error: %v", err)
+	}
+	if len(result.Items) != 3 {
+		t.Fatalf("items len=%d, want=3", len(result.Items))
+	}
+	if result.NextKey == nil || *result.NextKey != next {
+		t.Fatalf("NextKey=%v, want=%q", result.NextKey, next)
+	}
+	if result.PreviousKey == nil || *result.PreviousKey != prev {
+		t.Fatalf("PreviousKey=%v, want=%q", result.PreviousKey, prev)
+	}
+	if !result.HasNext() || !result.HasPrevious() {
+		t.Fatalf("expected next/previous keys to be available: %+v", result)
+	}
+
+	after := "k1"
+	_, err = p.PaginateByKeyset(context.Background(), KeysetRequest{AfterKey: &after, BeforeKey: &before})
+	if err == nil {
+		t.Fatal("expected keyset validation error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidKeyset) {
+		t.Fatalf("expected ErrInvalidKeyset, got: %v", err)
+	}
+}
+
+func TestPaginateByKeyset_NilContextReturnsError(t *testing.T) {
+	p := NewPaginator[int](
+		WithKeysetSliceCallback[int](func(ctx context.Context, req KeysetRequest) (*KeysetResult[int], error) {
+			t.Fatal("keyset callback should not be called when context is nil")
+			return nil, nil
+		}),
+	)
+
+	_, err := p.PaginateByKeyset(context.TODO(), KeysetRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "context must not be nil") {
+		t.Fatalf("expected nil-context error message, got: %v", err)
+	}
+}
+
+// --- Minor 1: Keyset pagination test parity with cursor pagination ---
+
+func TestPaginateByKeyset_CallbackError(t *testing.T) {
+	inner := errors.New("keyset query failed")
+	p := NewPaginator[int](
+		WithKeysetSliceCallback[int](func(ctx context.Context, req KeysetRequest) (*KeysetResult[int], error) {
+			return nil, inner
+		}),
+	)
+
+	_, err := p.PaginateByKeyset(context.Background(), KeysetRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected wrapped callback error, got nil")
+	}
+	if !errors.Is(err, inner) {
+		t.Fatalf("expected wrapped inner error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "keysetSliceCallback failed") {
+		t.Fatalf("expected contextual message, got: %v", err)
+	}
+}
+
+func TestPaginateByKeyset_RequiresCallback(t *testing.T) {
+	p := NewPaginator[int]()
+	_, err := p.PaginateByKeyset(context.Background(), KeysetRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrCallbackNotFound) {
+		t.Fatalf("expected ErrCallbackNotFound, got: %v", err)
+	}
+}
+
+func TestPaginateByKeyset_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p := NewPaginator[int](
+		WithKeysetSliceCallback[int](func(ctx context.Context, req KeysetRequest) (*KeysetResult[int], error) {
+			t.Fatal("keyset callback should not be called for cancelled context")
+			return nil, nil
+		}),
+	)
+
+	_, err := p.PaginateByKeyset(ctx, KeysetRequest{Limit: 1})
+	if err == nil {
+		t.Fatal("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+}
+
+// --- Minor 2: Invalid direction and negative limit tests ---
+
+func TestPaginateByCursor_InvalidDirectionAndNegativeLimit(t *testing.T) {
+	p := NewPaginator[int](
+		WithCursorSliceCallback[int](func(ctx context.Context, req CursorRequest) (*CursorResult[int], error) {
+			t.Fatal("callback should not be called for invalid request")
+			return nil, nil
+		}),
+	)
+
+	t.Run("invalid direction", func(t *testing.T) {
+		_, err := p.PaginateByCursor(context.Background(), CursorRequest{
+			Limit:     1,
+			Direction: "invalid",
+		})
+		if err == nil {
+			t.Fatal("expected error for invalid direction, got nil")
+		}
+		if !errors.Is(err, ErrInvalidCursor) {
+			t.Fatalf("expected ErrInvalidCursor, got: %v", err)
+		}
+	})
+
+	t.Run("negative limit", func(t *testing.T) {
+		_, err := p.PaginateByCursor(context.Background(), CursorRequest{
+			Limit: -1,
+		})
+		if err == nil {
+			t.Fatal("expected error for negative limit, got nil")
+		}
+		if !errors.Is(err, ErrInvalidCursor) {
+			t.Fatalf("expected ErrInvalidCursor, got: %v", err)
+		}
+	})
+}
+
+func TestPaginateByKeyset_InvalidDirectionAndNegativeLimit(t *testing.T) {
+	p := NewPaginator[int](
+		WithKeysetSliceCallback[int](func(ctx context.Context, req KeysetRequest) (*KeysetResult[int], error) {
+			t.Fatal("callback should not be called for invalid request")
+			return nil, nil
+		}),
+	)
+
+	t.Run("invalid direction", func(t *testing.T) {
+		_, err := p.PaginateByKeyset(context.Background(), KeysetRequest{
+			Limit:     1,
+			Direction: "invalid",
+		})
+		if err == nil {
+			t.Fatal("expected error for invalid direction, got nil")
+		}
+		if !errors.Is(err, ErrInvalidKeyset) {
+			t.Fatalf("expected ErrInvalidKeyset, got: %v", err)
+		}
+	})
+
+	t.Run("negative limit", func(t *testing.T) {
+		_, err := p.PaginateByKeyset(context.Background(), KeysetRequest{
+			Limit: -1,
+		})
+		if err == nil {
+			t.Fatal("expected error for negative limit, got nil")
+		}
+		if !errors.Is(err, ErrInvalidKeyset) {
+			t.Fatalf("expected ErrInvalidKeyset, got: %v", err)
 		}
 	})
 }

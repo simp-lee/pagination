@@ -6,6 +6,7 @@ A type-safe pagination package for Go applications.
 
 - Generic API (`[]T` end-to-end)
 - Context-aware callbacks for count and page slices
+- Cursor-based and keyset-based pagination APIs
 - Configurable `items per page` and `pages in range`
 - Optional known total (`WithKnownTotal`) to skip count callback
 - JSON-ready pagination result with helper methods
@@ -71,6 +72,41 @@ if err != nil {
 fmt.Println(result.TotalItems) // 1000
 ```
 
+## Cursor / Keyset Pagination
+
+```go
+paginator := pagination.NewPaginator[string](
+	pagination.WithCursorSliceCallback[string](func(ctx context.Context, req pagination.CursorRequest) (*pagination.CursorResult[string], error) {
+		items := []string{"item11", "item12"}
+		next := "cursor:12"
+		prev := "cursor:10"
+		return &pagination.CursorResult[string]{
+			Items:          items,
+			NextCursor:     &next,
+			PreviousCursor: &prev,
+			HasMore:        true,
+		}, nil
+	}),
+	pagination.WithKeysetSliceCallback[string](func(ctx context.Context, req pagination.KeysetRequest) (*pagination.KeysetResult[string], error) {
+		items := []string{"row42", "row41"}
+		next := "2026-01-10T12:00:00Z|41"
+		return &pagination.KeysetResult[string]{
+			Items:   items,
+			NextKey: &next,
+			HasMore: true,
+		}, nil
+	}),
+)
+
+afterCursor := "cursor:10"
+afterKey := "2026-01-10T12:00:00Z|40"
+cursorResult, _ := paginator.PaginateByCursor(context.Background(), pagination.CursorRequest{AfterCursor: &afterCursor, Limit: 2})
+keysetResult, _ := paginator.PaginateByKeyset(context.Background(), pagination.KeysetRequest{AfterKey: &afterKey, Limit: 2})
+
+fmt.Println(cursorResult.NextCursor, cursorResult.HasMore)
+fmt.Println(keysetResult.NextKey, keysetResult.HasMore)
+```
+
 ## API
 
 ### Sentinel Errors
@@ -80,6 +116,8 @@ fmt.Println(result.TotalItems) // 1000
 | `ErrInvalidPageNumber` | `currentPage` must be greater than 0 |
 | `ErrCallbackNotFound` | A required callback (`sliceCallback` or `itemTotalCallback`/`knownTotal`) is missing |
 | `ErrInvalidConfig` | Invalid option value (e.g. `itemsPerPage <= 0`, `pagesInRange <= 0`, `knownTotal < 0`) |
+| `ErrInvalidCursor` | Invalid cursor request (`after_cursor` and `before_cursor` both set, invalid direction, etc.) |
+| `ErrInvalidKeyset` | Invalid keyset request (`after_key` and `before_key` both set, invalid direction, etc.) |
 
 Use `errors.Is` to check:
 
@@ -93,6 +131,8 @@ if errors.Is(err, pagination.ErrInvalidPageNumber) {
 
 - `Paginator[T any]`
 - `Pagination[T any]`
+- `CursorPagination[T any]`
+- `KeysetPagination[T any]`
 - `Option[T any]`
 
 ### `Pagination[T]` Fields
@@ -119,11 +159,15 @@ if errors.Is(err, pagination.ErrInvalidPageNumber) {
 - `WithPagesInRange[T](n int)`
 - `WithItemTotalCallback[T](cb func(ctx context.Context) (int64, error))`
 - `WithSliceCallback[T](cb func(ctx context.Context, offset, limit int) ([]T, error))`
+- `WithCursorSliceCallback[T](cb func(ctx context.Context, req CursorRequest) (*CursorResult[T], error))`
+- `WithKeysetSliceCallback[T](cb func(ctx context.Context, req KeysetRequest) (*KeysetResult[T], error))`
 - `WithKnownTotal[T](total int64)`
 
 ### Methods
 
 - `(p *Paginator[T]) Paginate(ctx context.Context, currentPage int) (*Pagination[T], error)`
+- `(p *Paginator[T]) PaginateByCursor(ctx context.Context, req CursorRequest) (*CursorPagination[T], error)`
+- `(p *Paginator[T]) PaginateByKeyset(ctx context.Context, req KeysetRequest) (*KeysetPagination[T], error)`
 - `(p *Pagination[T]) HasPreviousPage() bool`
 - `(p *Pagination[T]) HasNextPage() bool`
 - `(p *Pagination[T]) IsFirstPage() bool`

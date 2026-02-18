@@ -39,6 +39,48 @@ type Pagination[T any] struct {
 	LastPageInRange int `json:"last_page_in_range"`
 }
 
+// CursorPagination represents a cursor-based pagination result structure.
+type CursorPagination[T any] struct {
+	// Items contains the fetched items
+	Items []T `json:"items"`
+
+	// NextCursor is used to request the next segment
+	NextCursor *string `json:"next_cursor"`
+
+	// PreviousCursor is used to request the previous segment
+	PreviousCursor *string `json:"previous_cursor"`
+
+	// HasMore indicates whether more data is available in the requested direction
+	HasMore bool `json:"has_more"`
+
+	// Limit is the effective page size for this cursor request
+	Limit int `json:"limit"`
+
+	// Direction is the cursor traversal direction (forward/backward)
+	Direction Direction `json:"direction"`
+}
+
+// KeysetPagination represents a keyset-based pagination result structure.
+type KeysetPagination[T any] struct {
+	// Items contains the fetched items
+	Items []T `json:"items"`
+
+	// NextKey is used to request the next segment
+	NextKey *string `json:"next_key"`
+
+	// PreviousKey is used to request the previous segment
+	PreviousKey *string `json:"previous_key"`
+
+	// HasMore indicates whether more data is available in the requested direction
+	HasMore bool `json:"has_more"`
+
+	// Limit is the effective page size for this keyset request
+	Limit int `json:"limit"`
+
+	// Direction is the keyset traversal direction (forward/backward)
+	Direction Direction `json:"direction"`
+}
+
 // HasPreviousPage checks if there is a previous page available
 func (p *Pagination[T]) HasPreviousPage() bool {
 	return p.PreviousPage != nil
@@ -57,4 +99,32 @@ func (p *Pagination[T]) IsFirstPage() bool {
 // IsLastPage checks if the current page is the last page
 func (p *Pagination[T]) IsLastPage() bool {
 	return p.CurrentPage == p.LastPage
+}
+
+// HasNext reports whether a NextCursor token is available for a subsequent
+// forward request. This differs from the HasMore field, which is the
+// authoritative signal from the data source indicating more data exists.
+func (p *CursorPagination[T]) HasNext() bool {
+	return p.NextCursor != nil
+}
+
+// HasPrevious reports whether a PreviousCursor token is available for a
+// subsequent backward request. This differs from the HasMore field, which
+// reflects the data source's own "more data" signal.
+func (p *CursorPagination[T]) HasPrevious() bool {
+	return p.PreviousCursor != nil
+}
+
+// HasNext reports whether a NextKey token is available for a subsequent
+// forward request. This differs from the HasMore field, which is the
+// authoritative signal from the data source indicating more data exists.
+func (p *KeysetPagination[T]) HasNext() bool {
+	return p.NextKey != nil
+}
+
+// HasPrevious reports whether a PreviousKey token is available for a
+// subsequent backward request. This differs from the HasMore field, which
+// reflects the data source's own "more data" signal.
+func (p *KeysetPagination[T]) HasPrevious() bool {
+	return p.PreviousKey != nil
 }
