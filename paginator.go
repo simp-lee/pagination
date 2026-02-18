@@ -3,114 +3,160 @@ package pagination
 import (
 	"context"
 	"errors"
-	"math"
+	"fmt"
 )
 
 var (
 	ErrInvalidPageNumber = errors.New("page number must be greater than 0")
 	ErrCallbackNotFound  = errors.New("callback function not found")
+	ErrInvalidConfig     = errors.New("invalid paginator configuration")
 )
 
-// Paginator handles the pagination logic
-type Paginator struct {
+// Paginator handles type-safe pagination logic.
+type Paginator[T any] struct {
 	// itemTotalCallback returns the total number of items
 	itemTotalCallback func(ctx context.Context) (int64, error)
 	// sliceCallback returns a slice of items for the current page
-	sliceCallback func(ctx context.Context, offset, limit int) (interface{}, error)
+	sliceCallback func(ctx context.Context, offset, limit int) ([]T, error)
 	// itemsPerPage defines how many items to display per page
 	itemsPerPage int
 	// pagesInRange defines how many page numbers to show in navigation
 	pagesInRange int
+	// configErr captures invalid option configuration errors
+	configErr error
+	// knownTotal optionally provides a precomputed total to skip itemTotalCallback
+	knownTotal *int64
 }
 
-// NewPaginator creates a new Paginator instance with the given options
-func NewPaginator(config ...Option) *Paginator {
-	p := &Paginator{
-		itemsPerPage: 10, // default 10 items per page
-		pagesInRange: 5,  // default 5 page numbers in navigation
+// Option configures Paginator.
+type Option[T any] func(*Paginator[T])
+
+// NewPaginator creates a new type-safe paginator instance with the given options.
+func NewPaginator[T any](config ...Option[T]) *Paginator[T] {
+	p := &Paginator[T]{
+		itemsPerPage: 10,
+		pagesInRange: 5,
 	}
 
 	for _, opt := range config {
+		if opt == nil {
+			continue
+		}
 		opt(p)
 	}
 
 	return p
 }
 
-type Option func(*Paginator)
+func (p *Paginator[T]) setConfigError(err error) {
+	p.configErr = errors.Join(p.configErr, err)
+}
 
-// WithItemsPerPage sets the number of items per page
-func WithItemsPerPage(n int) Option {
-	return func(p *Paginator) {
+// WithItemsPerPage sets the number of items per page for Paginator.
+func WithItemsPerPage[T any](n int) Option[T] {
+	return func(p *Paginator[T]) {
 		if n <= 0 {
-			panic("items per page must be greater than 0")
+			p.setConfigError(fmt.Errorf("%w: items per page must be greater than 0", ErrInvalidConfig))
+			return
 		}
 		p.itemsPerPage = n
 	}
 }
 
-// WithPagesInRange sets the number of page numbers to show in navigation
-func WithPagesInRange(n int) Option {
-	return func(p *Paginator) {
+// WithPagesInRange sets the number of page numbers to show in navigation for Paginator.
+func WithPagesInRange[T any](n int) Option[T] {
+	return func(p *Paginator[T]) {
 		if n <= 0 {
-			panic("pages in range must be greater than 0")
+			p.setConfigError(fmt.Errorf("%w: pages in range must be greater than 0", ErrInvalidConfig))
+			return
 		}
 		p.pagesInRange = n
 	}
 }
 
-// WithItemTotalCallback sets the callback function for getting total items count
-func WithItemTotalCallback(cb func(ctx context.Context) (int64, error)) Option {
-	return func(p *Paginator) {
+// WithItemTotalCallback sets the callback function for getting total items count for Paginator.
+func WithItemTotalCallback[T any](cb func(ctx context.Context) (int64, error)) Option[T] {
+	return func(p *Paginator[T]) {
 		p.itemTotalCallback = cb
 	}
 }
 
-// WithSliceCallback sets the callback function for getting page items
-func WithSliceCallback(cb func(ctx context.Context, offset, limit int) (interface{}, error)) Option {
-	return func(p *Paginator) {
+// WithSliceCallback sets the callback function for getting page items for Paginator.
+func WithSliceCallback[T any](cb func(ctx context.Context, offset, limit int) ([]T, error)) Option[T] {
+	return func(p *Paginator[T]) {
 		p.sliceCallback = cb
 	}
 }
 
-// Paginate performs the pagination and returns the result
-func (p *Paginator) Paginate(ctx context.Context, currentPage int) (*Pagination, error) {
-	if p.itemTotalCallback == nil || p.sliceCallback == nil {
-		return nil, ErrCallbackNotFound
+// WithKnownTotal sets a precomputed total items count and skips itemTotalCallback in Paginate.
+func WithKnownTotal[T any](total int64) Option[T] {
+	return func(p *Paginator[T]) {
+		if total < 0 {
+			p.setConfigError(fmt.Errorf("%w: total items must be greater than or equal to 0", ErrInvalidConfig))
+			return
+		}
+		p.knownTotal = &total
+	}
+}
+
+// Paginate performs pagination and returns a type-safe result.
+func (p *Paginator[T]) Paginate(ctx context.Context, currentPage int) (*Pagination[T], error) {
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
+	if p.sliceCallback == nil {
+		return nil, fmt.Errorf("%w: sliceCallback is required", ErrCallbackNotFound)
+	}
+	if p.knownTotal == nil && p.itemTotalCallback == nil {
+		return nil, fmt.Errorf("%w: either itemTotalCallback or knownTotal is required", ErrCallbackNotFound)
 	}
 	if currentPage <= 0 {
 		return nil, ErrInvalidPageNumber
 	}
 
-	// Get total items count
-	total, err := p.itemTotalCallback(ctx)
-	if err != nil {
-		return nil, err
+	total := int64(0)
+	var err error
+	if p.knownTotal != nil {
+		total = *p.knownTotal
+	} else {
+		total, err = p.itemTotalCallback(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("itemTotalCallback failed: %w", err)
+		}
+	}
+	if total < 0 {
+		return nil, fmt.Errorf("itemTotalCallback failed: %w", ErrInvalidConfig)
 	}
 
-	// Calculate total pages
-	numberOfPages := int(math.Ceil(float64(total) / float64(p.itemsPerPage)))
+	perPage := int64(p.itemsPerPage)
+	numberOfPages := int(total / perPage)
+	if total%perPage != 0 {
+		numberOfPages++
+	}
 	if numberOfPages == 0 {
 		numberOfPages = 1
 	}
 
-	// Ensure current page doesn't exceed total pages
 	if currentPage > numberOfPages {
 		currentPage = numberOfPages
 	}
 
-	// Calculate offset and get page items
-	offset := (currentPage - 1) * p.itemsPerPage
-	items, err := p.sliceCallback(ctx, offset, p.itemsPerPage)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// Calculate page range for navigation
-	pages := p.calculatePageRange(currentPage, numberOfPages)
+	offset := (currentPage - 1) * p.itemsPerPage
+	items, err := p.sliceCallback(ctx, offset, p.itemsPerPage)
+	if err != nil {
+		return nil, fmt.Errorf("sliceCallback failed: %w", err)
+	}
+	if items == nil {
+		items = make([]T, 0)
+	}
 
-	// Build pagination result
-	pagination := &Pagination{
+	pages := calculatePageRange(currentPage, numberOfPages, p.pagesInRange)
+
+	pagination := &Pagination[T]{
 		Items:            items,
 		Pages:            pages,
 		TotalPages:       numberOfPages,
@@ -123,7 +169,6 @@ func (p *Paginator) Paginate(ctx context.Context, currentPage int) (*Pagination,
 		LastPageInRange:  pages[len(pages)-1],
 	}
 
-	// Set previous/next page
 	if currentPage > 1 {
 		prev := currentPage - 1
 		pagination.PreviousPage = &prev
@@ -136,24 +181,22 @@ func (p *Paginator) Paginate(ctx context.Context, currentPage int) (*Pagination,
 	return pagination, nil
 }
 
-// calculatePageRange calculates which page numbers to show in navigation
-func (p *Paginator) calculatePageRange(currentPage, totalPages int) []int {
-	if totalPages <= p.pagesInRange {
+// calculatePageRange calculates which page numbers to show in navigation.
+func calculatePageRange(currentPage, totalPages, windowSize int) []int {
+	if totalPages <= windowSize {
 		return generateSequence(1, totalPages)
 	}
 
-	half := p.pagesInRange / 2
-	start := currentPage - half
-	end := currentPage + half
+	start := currentPage - (windowSize-1)/2
+	end := start + windowSize - 1
 
-	// Handle edge cases
 	if start < 1 {
 		start = 1
-		end = p.pagesInRange
+		end = windowSize
 	}
 	if end > totalPages {
 		end = totalPages
-		start = totalPages - p.pagesInRange + 1
+		start = totalPages - windowSize + 1
 	}
 
 	return generateSequence(start, end)

@@ -1,9 +1,9 @@
 package pagination
 
-// Pagination represents the pagination result structure
-type Pagination struct {
+// Pagination represents a type-safe pagination result structure.
+type Pagination[T any] struct {
 	// Items contains the slice of current page items
-	Items interface{} `json:"items"`
+	Items []T `json:"items"`
 
 	// Pages contains the array of page numbers to be displayed
 	Pages []int `json:"pages"`
@@ -40,33 +40,21 @@ type Pagination struct {
 }
 
 // HasPreviousPage checks if there is a previous page available
-func (p *Pagination) HasPreviousPage() bool {
+func (p *Pagination[T]) HasPreviousPage() bool {
 	return p.PreviousPage != nil
 }
 
 // HasNextPage checks if there is a next page available
-func (p *Pagination) HasNextPage() bool {
+func (p *Pagination[T]) HasNextPage() bool {
 	return p.NextPage != nil
 }
 
 // IsFirstPage checks if the current page is the first page
-func (p *Pagination) IsFirstPage() bool {
+func (p *Pagination[T]) IsFirstPage() bool {
 	return p.CurrentPage == p.FirstPage
 }
 
 // IsLastPage checks if the current page is the last page
-func (p *Pagination) IsLastPage() bool {
+func (p *Pagination[T]) IsLastPage() bool {
 	return p.CurrentPage == p.LastPage
-}
-
-// GetPageInfo returns a simplified map of pagination information
-func (p *Pagination) GetPageInfo() map[string]interface{} {
-	return map[string]interface{}{
-		"current_page":   p.CurrentPage,
-		"total_pages":    p.TotalPages,
-		"total_items":    p.TotalItems,
-		"has_next":       p.HasNextPage(),
-		"has_previous":   p.HasPreviousPage(),
-		"items_per_page": p.ItemsPerPage,
-	}
 }

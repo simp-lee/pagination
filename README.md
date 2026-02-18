@@ -1,17 +1,18 @@
 # Pagination
 
-A flexible and feature-rich pagination package for Go applications. Simple Pagination implements a paging interface on collections of things - from simple arrays to database lists to any collection you want to paginate through.
-
-> Inspired by [AshleyDawson/SimplePagination](https://github.com/AshleyDawson/SimplePagination)
+A type-safe pagination package for Go applications.
 
 ## Features
 
-- Context support for database operations
-- Customizable items per page
-- Configurable page range navigation
-- JSON-ready pagination results
-- Helper methods for pagination state
-- Callback-based data fetching
+- Generic API (`[]T` end-to-end)
+- Context-aware callbacks for count and page slices
+- Configurable `items per page` and `pages in range`
+- Optional known total (`WithKnownTotal`) to skip count callback
+- JSON-ready pagination result with helper methods
+
+## Requirements
+
+- Go 1.25 or later (generics required)
 
 ## Installation
 
@@ -25,179 +26,121 @@ go get github.com/simp-lee/pagination
 package main
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
+	"context"
+	"fmt"
 
-    "github.com/simp-lee/pagination"
+	"github.com/simp-lee/pagination"
 )
 
 func main() {
-    // Create a new paginator with custom options
-    paginator := pagination.NewPaginator(
-        pagination.WithItemsPerPage(10),
-        pagination.WithPagesInRange(5),
-        pagination.WithItemTotalCallback(func(ctx context.Context) (int64, error) {
-            return 100, nil // Return total number of items
-        }),
-        pagination.WithSliceCallback(func(ctx context.Context, offset, limit int) (interface{}, error) {
-            return []string{"item1", "item2", "item3", "item4", "item5", "item6", "item7", "item8", "item9", "item10"}, nil // Return slice of items for current page
-        }),
-    )
-    
-    // Get page 1
-    result, err := paginator.Paginate(context.Background(), 1)
-    if err != nil {
-        panic(err)
-    }
+	paginator := pagination.NewPaginator[string](
+		pagination.WithItemsPerPage[string](10),
+		pagination.WithPagesInRange[string](5),
+		pagination.WithItemTotalCallback[string](func(ctx context.Context) (int64, error) {
+			return 100, nil
+		}),
+		pagination.WithSliceCallback[string](func(ctx context.Context, offset, limit int) ([]string, error) {
+			return []string{"item1", "item2"}, nil
+		}),
+	)
 
-    // Get the actual items
-    items := result.Items.([]string)
-    fmt.Println("Items:", items)
+	result, err := paginator.Paginate(context.Background(), 1)
+	if err != nil {
+		panic(err)
+	}
 
-    // Print pagination info
-    info := result.GetPageInfo()
-    bytes, _ := json.MarshalIndent(info, "", "    ")
-    fmt.Printf("Pagination Info:\n%s\n", string(bytes))
-
-    // Expected output:
-    // Items: [item1 item2 item3 item4 item5 item6 item7 item8 item9 item10]
-    // Pagination Info:
-    // {
-    //     "current_page": 1,
-    //     "total_pages": 10,
-    //     "total_items": 100,
-    //     "has_next": true,
-    //     "has_previous": false,
-    //     "items_per_page": 10
-    // }
+	fmt.Println(result.Items)
+	fmt.Println(result.TotalPages)
 }
 ```
 
-## Pagination Result Structure
+## Reuse a Known Total (Skip Count Query)
 
 ```go
-type Pagination struct {
-    Items interface{} `json:"items"`
-    Pages []int `json:"pages"`
-    TotalPages int `json:"total_pages"`
-    CurrentPage int `json:"current_page"`
-    FirstPage int `json:"first_page"`
-    LastPage int `json:"last_page"`
-    PreviousPage *int `json:"previous_page"`
-    NextPage     *int `json:"next_page"`
-    ItemsPerPage int `json:"items_per_page"`
-    TotalItems int64 `json:"total_items"`
-    FirstPageInRange int `json:"first_page_in_range"`
-    LastPageInRange int `json:"last_page_in_range"`
-}
-```
-
-## Template Usage Example
-
-### HTML Template Example
-
-```html
-<!-- pagination.html -->
-<div class="pagination">
-    {{if .HasPreviousPage}}
-        <a href="?page={{.PreviousPage}}">&laquo; Previous</a>
-    {{end}}
-    {{range .Pages}}
-        <a href="?page={{.}}" {{if eq . $.CurrentPage}}class="active"{{end}}>
-            {{.}}
-        </a>
-    {{end}}
-    {{if .HasNextPage}}
-        <a href="?page={{.NextPage}}">Next &raquo;</a>
-    {{end}}
-</div>
-<div class="info">
-    Page {{.CurrentPage}} of {{.TotalPages}}
-    (Total: {{.TotalItems}})
-</div>
-```
-
-### Basic Usage with HTML Handler
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "net/http"
-    "strconv"
-    "html/template"
-    
-    "github.com/simp-lee/pagination"
+paginator := pagination.NewPaginator[string](
+	pagination.WithKnownTotal[string](1000),
+	pagination.WithSliceCallback[string](func(ctx context.Context, offset, limit int) ([]string, error) {
+		return []string{"item1", "item2"}, nil
+	}),
 )
 
-func handleList(w http.ResponseWriter, r *http.Request) {
-    page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-    if page < 1 {
-        page = 1
-    }
-    paginator := pagination.NewPaginator(
-        pagination.WithItemsPerPage(10),
-        pagination.WithPagesInRange(5),
-        pagination.WithItemTotalCallback(func(ctx context.Context) (int64, error) {
-            return 100, nil // Your total count logic
-        }),
-        pagination.WithSliceCallback(func(ctx context.Context, offset, limit int) (interface{}, error) {
-            return []string{"Item 1", "Item 2"}, nil // Your data fetching logic
-        }),
-    )
-
-    // Parse template
-    tmpl, err := template.ParseFiles("pagination.html")
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-    
-    result, err := paginator.Paginate(r.Context(), page)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-    
-    err = tmpl.Execute(w, result)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-    }
+result, err := paginator.Paginate(context.Background(), 1)
+if err != nil {
+	panic(err)
 }
-
-func main() {
-    http.HandleFunc("/", handleList)
-    fmt.Println("Server starting on :8080...")
-    if err := http.ListenAndServe(":8080", nil); err != nil {
-        panic(err)
-    }
-}
+fmt.Println(result.TotalItems) // 1000
 ```
 
-## Helper Methods
+## API
+
+### Sentinel Errors
+
+| Error | Description |
+|---|---|
+| `ErrInvalidPageNumber` | `currentPage` must be greater than 0 |
+| `ErrCallbackNotFound` | A required callback (`sliceCallback` or `itemTotalCallback`/`knownTotal`) is missing |
+| `ErrInvalidConfig` | Invalid option value (e.g. `itemsPerPage <= 0`, `pagesInRange <= 0`, `knownTotal < 0`) |
+
+Use `errors.Is` to check:
 
 ```go
-// Helper Methods for checking pagination state
-func (p *Pagination) HasPreviousPage() bool    // Check if there is a previous page
-func (p *Pagination) HasNextPage() bool        // Check if there is a next page
-func (p *Pagination) IsFirstPage() bool        // Check if current page is the first page
-func (p *Pagination) IsLastPage() bool         // Check if current page is the last page
-func (p *Pagination) GetPageInfo() map[string]interface{} // Get simplified pagination information
+if errors.Is(err, pagination.ErrInvalidPageNumber) {
+	// handle invalid page
+}
 ```
 
-## Configuration Options
+### Types
 
-- `WithItemsPerPage(n int)`: Set the number of items per page
-- `WithPagesInRange(n int)`: Set the number of page numbers to show in navigation
-- `WithItemTotalCallback(fn func(ctx context.Context) (int64, error))`: Set the callback function to get the total number of items
-- `WithSliceCallback(fn func(ctx context.Context, offset, limit int) (interface{}, error))`: Set the callback function to get the slice of items for the current page
+- `Paginator[T any]`
+- `Pagination[T any]`
+- `Option[T any]`
 
-## Concurrency Notes
+### `Pagination[T]` Fields
 
-The paginator itself is immutable after creation, but thread safety depends on your callback implementations. Make sure your database operations or other data fetching mechanisms in callbacks are thread-safe if you plan to use the paginator across multiple goroutines.
+| Field | Type | JSON Key | Description |
+|---|---|---|---|
+| `Items` | `[]T` | `items` | Slice of items for the current page |
+| `Pages` | `[]int` | `pages` | Page numbers to display in navigation |
+| `TotalPages` | `int` | `total_pages` | Total number of pages |
+| `CurrentPage` | `int` | `current_page` | Current page number |
+| `FirstPage` | `int` | `first_page` | Always `1` |
+| `LastPage` | `int` | `last_page` | Equal to `TotalPages` |
+| `PreviousPage` | `*int` | `previous_page` | Previous page number; `nil` on first page |
+| `NextPage` | `*int` | `next_page` | Next page number; `nil` on last page |
+| `ItemsPerPage` | `int` | `items_per_page` | Number of items per page |
+| `TotalItems` | `int64` | `total_items` | Total number of items across all pages |
+| `FirstPageInRange` | `int` | `first_page_in_range` | First page number in the current navigation range |
+| `LastPageInRange` | `int` | `last_page_in_range` | Last page number in the current navigation range |
+
+### Constructors and Options
+
+- `NewPaginator[T](config ...Option[T])`
+- `WithItemsPerPage[T](n int)`
+- `WithPagesInRange[T](n int)`
+- `WithItemTotalCallback[T](cb func(ctx context.Context) (int64, error))`
+- `WithSliceCallback[T](cb func(ctx context.Context, offset, limit int) ([]T, error))`
+- `WithKnownTotal[T](total int64)`
+
+### Methods
+
+- `(p *Paginator[T]) Paginate(ctx context.Context, currentPage int) (*Pagination[T], error)`
+- `(p *Pagination[T]) HasPreviousPage() bool`
+- `(p *Pagination[T]) HasNextPage() bool`
+- `(p *Pagination[T]) IsFirstPage() bool`
+- `(p *Pagination[T]) IsLastPage() bool`
+
+## Configuration Notes
+
+- Invalid values for `WithItemsPerPage` / `WithPagesInRange` are captured and returned by `Paginate`.
+- `WithKnownTotal` avoids calling `WithItemTotalCallback` during pagination.
+- If `WithKnownTotal` is not set, `WithItemTotalCallback` is required.
+- `WithSliceCallback` is always required.
+
+## Behavior Notes
+
+- If `currentPage` is greater than total pages, `Paginate` clamps it to the last page.
+- If total items is `0`, pagination still returns `TotalPages = 1` and `CurrentPage = 1`.
+- Context cancellation is checked before calling `WithSliceCallback` (after total is resolved).
 
 ## License
 
